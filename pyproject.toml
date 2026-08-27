@@ -1,0 +1,18 @@
+[project]
+name = "pricegetter-redis"
+version = "0.1.0"
+description = "EVE Online market loader that fetches ESI orders and publishes aggregates straight to Redis, no SQL database required."
+authors = [
+    { name = "Steve Ronuken", email = "steve@fuzzysteve.co.uk" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=2.2.6",
+    "pandas>=2.3.3",
+    "redis>=8.1.0",
+    "requests>=2.34.2",
+    "requests-futures>=1.0.2",
+]
+
+[tool.uv]
+package = false

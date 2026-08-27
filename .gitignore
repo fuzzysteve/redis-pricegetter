@@ -1,0 +1,14 @@
+config.cfg
+structurePoller.cfg
+discord-webhook.txt
+*.log
+*.lock
+!uv.lock
+logs/*.txt
+.venv/
+__pycache__/
+
+# Generated data, not source - regenerate with build_sde_snapshot.py /
+# structurePoller.py rather than editing by hand.
+sde_snapshot.json
+structures.json
