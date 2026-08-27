@@ -14,7 +14,7 @@ JITA_4_4_STATION_ID = 60003760
 # so Redis itself expires them once they're stale -- a missing key already means
 # "not updated in the last 1.5 hours". Keep this in sync with the `ex=` value
 # and REDIS_KEY_PREFIX used in aggloader-esi.py's Redis writes.
-REDIS_KEY_PREFIX = "cli-"
+REDIS_KEY_PREFIX = ""
 KEYS_TO_CHECK = [
     "{}{}|{}|true".format(REDIS_KEY_PREFIX, JITA_4_4_STATION_ID, TRITANIUM_TYPE_ID),
     "{}{}|{}|false".format(REDIS_KEY_PREFIX, JITA_4_4_STATION_ID, TRITANIUM_TYPE_ID),

@@ -22,9 +22,7 @@ from requests_futures.sessions import FuturesSession
 REQUEST_TIMEOUT = 30
 LOG_RETENTION_DAYS = 7
 REDIS_TTL_SECONDS = 5400
-# Fixed for now so this can be pointed at a shared/production Redis instance
-# during testing without colliding with the real production keys.
-REDIS_KEY_PREFIX = "cli-"
+REDIS_KEY_PREFIX = ""
 
 ORDER_COLUMNS = ['orderID', 'typeID', 'issued', 'buy', 'volume', 'volumeEntered',
                   'minVolume', 'price', 'stationID', 'range', 'duration', 'region']
