@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import sys
+import tempfile
 import time
 import traceback
 from concurrent.futures import as_completed
@@ -43,6 +44,21 @@ def setup_logging(debug=False):
             continue
         if filedate < cutoff:
             os.remove(path)
+
+
+def atomic_write(path, write_fn):
+    # Writes via a temp file in the same directory, then os.replace()'s it into
+    # place - a crash mid-write can never leave a truncated/corrupt config.cfg
+    # for the next run to choke on.
+    directory = os.path.dirname(os.path.abspath(path)) or '.'
+    fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=os.path.basename(path) + '.', suffix='.tmp')
+    try:
+        with os.fdopen(fd, 'w') as f:
+            write_fn(f)
+        os.replace(tmp_path, path)
+    except BaseException:
+        os.remove(tmp_path)
+        raise
 
 
 def get_data(requests_connection, url, retry, page, region, structure):
@@ -174,8 +190,9 @@ def compute_side(df, is_buy):
     df['lastsum'] = df.groupby('what')['cumsum'].shift(1)
     df.fillna(0, inplace=True)
     df['applies'] = numpy.where(df['cumsum'] <= df['fivepercent'], df['volume'], df['fivepercent'] - df['lastsum'])
-    num = df._get_numeric_data()
-    num[num < 0] = 0
+    # fivepercent - lastsum goes negative once cumsum has already passed the
+    # 5%-of-volume mark by more than the current row alone accounts for.
+    df['applies'] = df['applies'].clip(lower=0)
     df['applies'] = df['applies'].mask(df.groupby('what')['applies'].transform('sum') == 0, 0.01)
     df['weight'] = df['volume'].mask(df.groupby('what')['volume'].transform('sum') == 0, 0.01)
 
@@ -300,34 +317,40 @@ def main():
         # before structurePoller.py has ever populated structures.json.
         logging.warning("No structures known, skipping OAuth and structure-order fetch")
     else:
-        # Structure orders need an authenticated (OAuth) ESI call.
-        token = clientid + ':' + secret
-        message_bytes = token.encode('ascii')
-        base64_message = base64.b64encode(message_bytes).decode('ascii')
-        headers = {'Authorization': 'Basic ' + base64_message, 'User-Agent': useragent,
-                   "Content-Type": "application/x-www-form-urlencoded"}
-        query = {'grant_type': 'refresh_token', 'refresh_token': refreshtoken}
-        r = requests.post('https://login.eveonline.com/v2/oauth/token', data=query, headers=headers, timeout=REQUEST_TIMEOUT)
-        response = r.json()
-        accesstoken = response['access_token']
-        refreshtokennew = response['refresh_token']
-        if refreshtokennew != refreshtoken:
-            with open(inifile, 'w') as cfgfile:
+        # Structure orders need an authenticated (OAuth) ESI call. A failure
+        # here shouldn't discard the region orders already fetched into buf --
+        # log it and fall through to publish region/station/universe
+        # aggregates without structure orders instead of aborting entirely.
+        try:
+            token = clientid + ':' + secret
+            message_bytes = token.encode('ascii')
+            base64_message = base64.b64encode(message_bytes).decode('ascii')
+            headers = {'Authorization': 'Basic ' + base64_message, 'User-Agent': useragent,
+                       "Content-Type": "application/x-www-form-urlencoded"}
+            query = {'grant_type': 'refresh_token', 'refresh_token': refreshtoken}
+            r = requests.post('https://login.eveonline.com/v2/oauth/token', data=query, headers=headers, timeout=REQUEST_TIMEOUT)
+            r.raise_for_status()
+            response = r.json()
+            accesstoken = response['access_token']
+            refreshtokennew = response['refresh_token']
+            if refreshtokennew != refreshtoken:
                 config.set('oauth', 'refreshtoken', refreshtokennew)
-                config.write(cfgfile)
+                atomic_write(inifile, config.write)
 
-        logging.debug("Access Token {}".format(accesstoken))
-        logging.debug("refresh Token {}".format(refreshtokennew))
+            logging.debug("Access Token {}".format(accesstoken))
+            logging.debug("refresh Token {}".format(refreshtokennew))
 
-        session.headers.update({'Authorization': 'Bearer ' + accesstoken, 'X-Compatibility-Date': compatdate})
+            session.headers.update({'Authorization': 'Bearer ' + accesstoken, 'X-Compatibility-Date': compatdate})
 
-        urls = []
-        for _, row in structures_df.iterrows():
-            urls.append({'url': "https://esi.evetech.net/markets/structures/{}/?&datasource=tranquility&page=".format(row['stationID']),
-                          'retry': 0, 'page': 1, 'region': row['regionID'], 'structure': 1})
+            urls = []
+            for _, row in structures_df.iterrows():
+                urls.append({'url': "https://esi.evetech.net/markets/structures/{}/?&datasource=tranquility&page=".format(row['stationID']),
+                              'retry': 0, 'page': 1, 'region': row['regionID'], 'structure': 1})
 
-        logging.warning("Fetching structure orders")
-        fetch_wave(session, urls, orderwriter, requeue_retries={1})
+            logging.warning("Fetching structure orders")
+            fetch_wave(session, urls, orderwriter, requeue_retries={1})
+        except Exception:
+            logging.exception("OAuth refresh or structure-order fetch failed; continuing with region orders only")
 
     buf.seek(0)
     orders_df = pandas.read_csv(buf, sep="\t", header=None, names=ORDER_COLUMNS)

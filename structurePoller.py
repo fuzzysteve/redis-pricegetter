@@ -20,6 +20,7 @@ import glob
 import json
 import logging
 import os
+import tempfile
 import time
 from concurrent.futures import as_completed
 
@@ -46,6 +47,21 @@ def setup_logging(debug=False):
             continue
         if filedate < cutoff:
             os.remove(path)
+
+
+def atomic_write(path, write_fn):
+    # Writes via a temp file in the same directory, then os.replace()'s it into
+    # place - a crash mid-write can never leave a truncated/corrupt
+    # structures.json or structurePoller.cfg for the next run to choke on.
+    directory = os.path.dirname(os.path.abspath(path)) or '.'
+    fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=os.path.basename(path) + '.', suffix='.tmp')
+    try:
+        with os.fdopen(fd, 'w') as f:
+            write_fn(f)
+        os.replace(tmp_path, path)
+    except BaseException:
+        os.remove(tmp_path)
+        raise
 
 
 def get_data(requests_connection, url, retry, page, region):
@@ -133,9 +149,8 @@ def get_access_token(config, inifile):
     accesstoken = response['access_token']
     refreshtokennew = response['refresh_token']
     if refreshtokennew != refreshtoken:
-        with open(inifile, 'w') as cfgfile:
-            config.set('oauth', 'refreshtoken', refreshtokennew)
-            config.write(cfgfile)
+        config.set('oauth', 'refreshtoken', refreshtokennew)
+        atomic_write(inifile, config.write)
     return accesstoken
 
 
@@ -207,8 +222,7 @@ def main():
         'generated_at': datetime.datetime.utcnow().isoformat(),
         'structures': structures,
     }
-    with open(out_path, 'w') as f:
-        json.dump(snapshot, f)
+    atomic_write(out_path, lambda f: json.dump(snapshot, f))
 
     logging.warning("Wrote {} structures to {}".format(len(structures), out_path))
 
