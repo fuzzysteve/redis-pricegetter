@@ -61,6 +61,24 @@ def atomic_write(path, write_fn):
         raise
 
 
+def check_esi_status(useragent, compatdate):
+    # Cheap single request (status/ is cached ~30s server-side) so an ESI
+    # outage - the daily 11:00 UTC downtime running long, or an unplanned one
+    # - gets caught here instead of as a wall of per-URL fetch_wave retries.
+    # checkFreshness.py's staleness alert already covers "the loader didn't
+    # run", so this skips quietly (exit 0, no Discord alert of its own)
+    # rather than raising.
+    headers = {'User-Agent': useragent, 'X-Compatibility-Date': compatdate}
+    try:
+        resp = requests.get('https://esi.evetech.net/latest/status/?datasource=tranquility',
+                             headers=headers, timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        return True
+    except requests.exceptions.RequestException as e:
+        logging.warning("ESI status check failed: {}".format(e))
+        return False
+
+
 def get_data(requests_connection, url, retry, page, region, structure):
     future = requests_connection.get(url + str(page), timeout=REQUEST_TIMEOUT)
     logging.info('getting {}#{}#{}#{}'.format(retry, page, region, url + str(page)))
@@ -280,6 +298,10 @@ def main():
     redis_password = config.get('redis', 'password', fallback=None)
 
     compatdate = (datetime.datetime.utcnow() - datetime.timedelta(hours=11)).strftime('%Y-%m-%d')
+
+    if not check_esi_status(useragent, compatdate):
+        logging.warning("Skipping this run: ESI status check did not succeed")
+        return
 
     session = FuturesSession(max_workers=reqs_num_workers)
     session.headers.update({'User-Agent': useragent, 'X-Compatibility-Date': compatdate})

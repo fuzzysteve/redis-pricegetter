@@ -64,6 +64,24 @@ def atomic_write(path, write_fn):
         raise
 
 
+def check_esi_status(useragent, compatdate):
+    # Cheap single request (status/ is cached ~30s server-side) so an ESI
+    # outage - the daily 11:00 UTC downtime running long, or an unplanned one
+    # - gets caught here instead of as a wall of per-URL sweep retries and a
+    # wasted OAuth refresh. Skips quietly (exit 0) rather than raising -
+    # structure discovery is low-frequency and non-critical, next run picks
+    # it back up.
+    headers = {'User-Agent': useragent, 'X-Compatibility-Date': compatdate}
+    try:
+        resp = requests.get('https://esi.evetech.net/latest/status/?datasource=tranquility',
+                             headers=headers, timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        return True
+    except requests.exceptions.RequestException as e:
+        logging.warning("ESI status check failed: {}".format(e))
+        return False
+
+
 def get_data(requests_connection, url, retry, page, region):
     future = requests_connection.get(url + str(page), timeout=REQUEST_TIMEOUT)
     future.url = url
@@ -180,6 +198,11 @@ def main():
     if args.regions:
         wanted = {int(r) for r in args.regions.split(',')}
         regionids = [r for r in regionids if r in wanted]
+
+    compatdate = (datetime.datetime.utcnow() - datetime.timedelta(hours=11)).strftime('%Y-%m-%d')
+    if not check_esi_status(useragent, compatdate):
+        logging.warning("Skipping this run: ESI status check did not succeed")
+        return
 
     logging.warning("Authenticating")
     accesstoken = get_access_token(config, inifile)
