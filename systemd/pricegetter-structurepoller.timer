@@ -1,0 +1,10 @@
+[Unit]
+Description=Run pricegetter-structurepoller.service daily, anchored to UTC, well clear of the ESI 11:00-11:30 UTC downtime window
+
+[Timer]
+OnCalendar=*-*-* 02:13:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

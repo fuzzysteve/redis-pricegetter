@@ -1,0 +1,9 @@
+[Unit]
+Description=pricegetter-redis: fetch EVE market orders and publish aggregates to Redis
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/pricegetter-redis
+ExecStart=/opt/pricegetter-redis/loadPrices.sh

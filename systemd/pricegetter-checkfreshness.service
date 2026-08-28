@@ -1,0 +1,8 @@
+[Unit]
+Description=pricegetter-redis: check Redis for stale price data and alert via Discord
+After=pricegetter-loadprices.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/pricegetter-redis
+ExecStart=/opt/pricegetter-redis/checkFreshness.sh

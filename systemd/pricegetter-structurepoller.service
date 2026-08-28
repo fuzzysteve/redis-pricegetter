@@ -1,0 +1,9 @@
+[Unit]
+Description=pricegetter-redis: discover citadels with a public market
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/pricegetter-redis
+ExecStart=/opt/pricegetter-redis/structurePoller.sh

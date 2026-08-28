@@ -29,6 +29,7 @@ the database lookups a Postgres-backed version of this pipeline would do.
 | `checkFreshness.py` | Canary: checks Redis for a known liquid item/station pair (Tritanium at Jita 4-4) and alerts via Discord if stale. |
 | `loadPrices.sh` / `structurePoller.sh` / `checkFreshness.sh` | Cron/systemd-timer wrappers — locking, log rotation, and Discord alerting around the scripts above. |
 | `lib-discord.sh` | Shared `load_discord_webhook` / `notify_discord` helpers, sourced by the three wrapper scripts. |
+| `systemd/` | `.service`/`.timer` units for scheduling the three wrapper scripts — see [Scheduling with systemd](#scheduling-with-systemd) below. |
 
 ## Setup
 
@@ -44,10 +45,11 @@ the database lookups a Postgres-backed version of this pipeline would do.
    in the same format.
 5. Optionally create `discord-webhook.txt` (a single line: your Discord
    webhook URL) for failure/staleness alerts.
-6. Schedule the wrapper scripts: `loadPrices.sh` frequently (e.g. every
-   30 min), `structurePoller.sh` infrequently (e.g. daily),
-   `checkFreshness.sh` frequently, offset a few minutes after
-   `loadPrices.sh` so it checks after a load has had a chance to finish.
+6. Schedule the wrapper scripts — via systemd (see below) or cron:
+   `loadPrices.sh` frequently (e.g. every 30 min), `structurePoller.sh`
+   infrequently (e.g. daily), `checkFreshness.sh` frequently, offset a few
+   minutes after `loadPrices.sh` so it checks after a load has had a chance
+   to finish.
 
 ## Configuration
 
@@ -80,6 +82,53 @@ their own config file whenever ESI returns a new one.
 `structurePoller.cfg` additionally reads `[data] out` for where to write
 `structures.json` (defaults to `structures.json`), and doesn't need a
 `[redis]` section — it never touches Redis.
+
+## Scheduling with systemd
+
+`systemd/` holds `.service`/`.timer` unit pairs for the three wrapper
+scripts. Each `.service` is `Type=oneshot` and just runs the matching `.sh`
+wrapper (which still does its own locking, log rotation, and Discord
+alerting); each `.timer` controls when it fires. Units hardcode
+`/opt/pricegetter-redis` as both `WorkingDirectory` and the `ExecStart`
+path, matching this repo's convention of being deployed at that fixed path
+— edit the paths in the unit files first if deploying elsewhere.
+
+Install:
+
+```
+sudo cp systemd/pricegetter-*.service systemd/pricegetter-*.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now pricegetter-loadprices.timer pricegetter-checkfreshness.timer pricegetter-structurepoller.timer
+```
+
+Check status:
+
+```
+systemctl list-timers 'pricegetter-*'
+systemctl status pricegetter-loadprices.service
+journalctl -u pricegetter-loadprices.service
+```
+
+To pick up a change to a unit file already installed, re-copy it and run
+`sudo systemctl daemon-reload` (the timer/service picks up the change on its
+next run; no restart needed for a oneshot).
+
+Default schedule (all `OnCalendar=` times are pinned to UTC, so they don't
+drift across Europe/Berlin's DST changes if the host's timezone is
+different):
+
+| Timer | Schedule (UTC) | Why |
+|---|---|---|
+| `pricegetter-loadprices.timer` | `:06` and `:36` past every hour, **except 11:06** | Every-30-min refresh, offset off the hour/half-hour; 11:06 is skipped because it falls inside ESI's daily 11:00–11:30 UTC downtime — 11:36 still runs, 6 min after the window closes. |
+| `pricegetter-checkfreshness.timer` | `:16` and `:46` past every hour, no gaps | Runs 10 min after `loadprices` so it checks a load that's had a chance to finish. It only reads Redis (never calls ESI), so unlike `loadprices` it keeps running straight through the downtime window — that's exactly when you want the staleness canary alive. |
+| `pricegetter-structurepoller.timer` | 02:13 UTC daily | Low-frequency structure discovery, anchored well clear of the downtime window. |
+
+All three also set `Persistent=true` (catches up after a reboot/downtime)
+and a small `RandomizedDelaySec` jitter. `aggloader-esi.py` and
+`structurePoller.py` additionally do their own ESI status pre-flight check
+(`GET /status/`) at the start of each run and skip quietly if it fails, so
+an unplanned ESI outage — or the daily downtime running long — doesn't turn
+into a wall of per-request retry failures.
 
 ## Redis key format
 
