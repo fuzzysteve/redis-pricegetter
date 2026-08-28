@@ -5,4 +5,5 @@ After=pricegetter-loadprices.service
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/pricegetter-redis
+Environment=PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=/opt/pricegetter-redis/checkFreshness.sh
