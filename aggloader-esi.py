@@ -25,6 +25,25 @@ LOG_RETENTION_DAYS = 7
 REDIS_TTL_SECONDS = 5400
 REDIS_KEY_PREFIX = ""
 
+# Exit code meaning "ESI is unhealthy, nothing was published". loadPrices.sh
+# reports it to Discord once per outage (and again on recovery).
+EXIT_ESI_UNHEALTHY = 75
+
+ESI_STATUS_URL = 'https://esi.evetech.net/meta/status'
+REGION_ORDERS_ROUTE = '/markets/{region_id}/orders'
+STRUCTURE_ORDERS_ROUTE = '/markets/structures/{structure_id}'
+
+# Back off (pausing new requests until the window resets) once ESI's error
+# budget drops to this many remaining errors, rather than running into 420s.
+ERROR_LIMIT_FLOOR = 20
+# Hard cap on the whole fetch phase; past this we give up rather than
+# publish late.
+FETCH_DEADLINE_SECONDS = 20 * 60
+
+# Shared throttle state: wall-clock time before which no new request batch is sent.
+throttle = {'pause_until': 0.0}
+orders_written = {'count': 0}
+
 ORDER_COLUMNS = ['orderID', 'typeID', 'issued', 'buy', 'volume', 'volumeEntered',
                   'minVolume', 'price', 'stationID', 'range', 'duration', 'region']
 
@@ -61,22 +80,59 @@ def atomic_write(path, write_fn):
         raise
 
 
-def check_esi_status(useragent, compatdate):
-    # Cheap single request (status/ is cached ~30s server-side) so an ESI
-    # outage - the daily 11:00 UTC downtime running long, or an unplanned one
-    # - gets caught here instead of as a wall of per-URL fetch_wave retries.
-    # checkFreshness.py's staleness alert already covers "the loader didn't
-    # run", so this skips quietly (exit 0, no Discord alert of its own)
-    # rather than raising.
-    headers = {'User-Agent': useragent, 'X-Compatibility-Date': compatdate}
+class ESIUnhealthy(Exception):
+    pass
+
+
+def note_rate_headers(resp):
+    """Update the shared pause from ESI's error-limit / rate-limit headers."""
+    h = resp.headers
+    pause = 0
     try:
-        resp = requests.get('https://esi.evetech.net/latest/status/?datasource=tranquility',
-                             headers=headers, timeout=REQUEST_TIMEOUT)
-        resp.raise_for_status()
-        return True
-    except requests.exceptions.RequestException as e:
-        logging.warning("ESI status check failed: {}".format(e))
-        return False
+        if resp.status_code in (420, 429):
+            pause = int(h.get('Retry-After') or h.get('X-ESI-Error-Limit-Reset') or 60)
+        elif 'X-ESI-Error-Limit-Remain' in h and int(h['X-ESI-Error-Limit-Remain']) <= ERROR_LIMIT_FLOOR:
+            pause = int(h.get('X-ESI-Error-Limit-Reset') or 60)
+    except ValueError:
+        pause = 60
+    if pause > 0:
+        until = time.time() + pause + 1
+        if until > throttle['pause_until']:
+            logging.warning("ESI error/rate limit hit (status {}, remain {}); pausing new requests for {}s".format(
+                resp.status_code, h.get('X-ESI-Error-Limit-Remain'), pause + 1))
+            throttle['pause_until'] = until
+
+
+def wait_for_throttle(deadline):
+    wait = throttle['pause_until'] - time.time()
+    if wait > 0:
+        if time.time() + wait > deadline:
+            raise ESIUnhealthy('error-limit pause of {:.0f}s would pass the fetch deadline'.format(wait))
+        logging.warning("Waiting {:.0f}s for ESI error limit to reset".format(wait))
+        time.sleep(wait)
+
+
+def get_esi_status(useragent, compatdate):
+    """Return {route path: status} for GET routes from ESI's /meta/status
+    (the API behind developers.eveonline.com/status), or None if it can't be
+    fetched. The caller treats None as "ESI is down"."""
+    try:
+        r = requests.get(ESI_STATUS_URL, headers={'User-Agent': useragent, 'X-Compatibility-Date': compatdate},
+                         timeout=REQUEST_TIMEOUT)
+        r.raise_for_status()
+        return {x['path']: x['status'] for x in r.json()['routes'] if x.get('method') == 'GET'}
+    except Exception as e:
+        logging.error("Could not fetch ESI status ({})".format(e))
+        return None
+
+
+def esi_unhealthy_exit(reason):
+    """Exit with EXIT_ESI_UNHEALTHY without publishing anything. The
+    'ESI-UNHEALTHY:' stderr line lands in the loadPrices log, and
+    loadPrices.sh puts it in the Discord report."""
+    logging.error("ESI unhealthy, nothing published: {}".format(reason))
+    print("ESI-UNHEALTHY: {}".format(reason), file=sys.stderr, flush=True)
+    sys.exit(EXIT_ESI_UNHEALTHY)
 
 
 def get_data(requests_connection, url, retry, page, region, structure):
@@ -94,6 +150,7 @@ def get_data(requests_connection, url, retry, page, region, structure):
 def process_data(result, orderwriter):
     try:
         resp = result.result()
+        note_rate_headers(resp)
         logging.info('Process {} {} {} {}'.format(resp.status_code, result.url, result.retry, result.region))
         if resp.status_code == 200:
             try:
@@ -103,6 +160,7 @@ def process_data(result, orderwriter):
                     if not result.structure and int(order['location_id']) > 100000000 and order['is_buy_order']:
                         pass
                     else:
+                        orders_written['count'] += 1
                         orderwriter.writerow([order['order_id'],
                                                order['type_id'],
                                                order['issued'],
@@ -137,10 +195,12 @@ def process_data(result, orderwriter):
         elif resp.status_code == 404:
             logging.error("404 status. {} returned {}".format(resp.url, resp.status_code))
             return {'retry': 4}
-        elif resp.status_code == 420:
-            logging.error("420 status. sleeping for 60.  {} returned {} on retry {}".format(resp.url, resp.status_code, result.retry))
-            time.sleep(60)
-            return {'retry': result.retry + 1, 'url': result.url, 'region': result.region, 'page': result.page, 'structure': result.structure}
+        elif resp.status_code in (420, 429):
+            # Throttled, not a real attempt: requeue at the same retry count.
+            # The pause itself is applied once, before the next batch (see
+            # note_rate_headers/wait_for_throttle), not per response.
+            logging.error("{} status (throttled). {} will be retried after the pause".format(resp.status_code, resp.url))
+            return {'retry': result.retry, 'url': result.url, 'region': result.region, 'page': result.page, 'structure': result.structure}
         else:
             logging.error("Non 200 status. {} returned {} on retry {}".format(resp.url, resp.status_code, result.retry))
             return {'retry': result.retry + 1, 'url': result.url, 'region': result.region, 'page': result.page, 'structure': result.structure}
@@ -150,25 +210,47 @@ def process_data(result, orderwriter):
     return {'retry': result.retry + 1, 'url': result.url, 'region': result.region, 'page': result.page, 'structure': result.structure}
 
 
-def fetch_wave(session, urls, orderwriter, requeue_retries):
-    # requeue_retries mirrors the (slightly asymmetric) requeue behaviour of
-    # the production script: the region-order wave retries on {1,2}, the
-    # structure-order wave only on {1}.
+def fetch_wave(session, urls, orderwriter, maxtries, deadline):
+    """Fetch every url (following pagination), retrying failed pages up to
+    maxtries attempts in total with a short backoff between rounds, and
+    honouring ESI's error limit. Returns the list of pages that never
+    succeeded. Raises ESIUnhealthy if the deadline passes."""
+    failed = []
     while len(urls) > 0:
+        if time.time() > deadline:
+            raise ESIUnhealthy('fetch deadline passed with {} page(s) outstanding'.format(len(urls)))
+        wait_for_throttle(deadline)
+        maxretry = max(u['retry'] for u in urls)
+        if maxretry > 0:
+            backoff = min(5 * (2 ** (maxretry - 1)), 30)
+            logging.warning("Backing off {}s before retry round {}".format(backoff, maxretry))
+            time.sleep(backoff)
         futures = []
-        logging.warning("Loop restarting")
+        logging.warning("Loop restarting ({} requests)".format(len(urls)))
         for url in urls:
             logging.info('URL:{}  Retry:{} page:{}'.format(url['url'], url['retry'], url['page']))
             futures.append(get_data(session, url['url'], url['retry'], url['page'], url['region'], url['structure']))
         urls = []
         for result in as_completed(futures):
+            if result.cancelled():
+                continue
             presult = process_data(result, orderwriter)
-            if presult['retry'] in requeue_retries:
-                urls.append(presult)
-                logging.info("adding {} to retry {}".format(result.url, presult['retry']))
             if presult['retry'] == 0 and presult['url'] is not None:
                 logging.info('{} has more pages. {}'.format(result.url, presult['retry']))
                 urls.append(presult)
+            elif 0 < presult['retry'] < maxtries:
+                urls.append(presult)
+                logging.info("adding {} to retry {}".format(result.url, presult['retry']))
+            elif presult['retry'] == maxtries:
+                failed.append(presult)
+            # retry > maxtries is the 403/404 "don't retry" marker
+            if throttle['pause_until'] > time.time():
+                # Stop sending the rest of this batch into the error limit;
+                # requeue anything not yet started at its current retry count.
+                for f in futures:
+                    if f.cancel():
+                        urls.append({'retry': f.retry, 'url': f.url, 'region': f.region, 'page': f.page, 'structure': f.structure})
+    return failed
 
 
 def load_sde_snapshot(path):
@@ -322,9 +404,14 @@ def main():
 
     compatdate = (datetime.datetime.utcnow() - datetime.timedelta(hours=11)).strftime('%Y-%m-%d')
 
-    if not check_esi_status(useragent, compatdate):
-        logging.warning("Skipping this run: ESI status check did not succeed")
-        return
+    deadline = time.time() + FETCH_DEADLINE_SECONDS
+    esistatus = get_esi_status(useragent, compatdate)
+    if esistatus is None:
+        esi_unhealthy_exit("ESI status endpoint {} unreachable; assuming ESI is down".format(ESI_STATUS_URL))
+    logging.warning("ESI status: region orders {}, structure orders {}".format(
+        esistatus.get(REGION_ORDERS_ROUTE), esistatus.get(STRUCTURE_ORDERS_ROUTE)))
+    if esistatus.get(REGION_ORDERS_ROUTE) == 'Down':
+        esi_unhealthy_exit("ESI status reports {} as Down".format(REGION_ORDERS_ROUTE))
 
     session = FuturesSession(max_workers=reqs_num_workers)
     session.headers.update({'User-Agent': useragent, 'X-Compatibility-Date': compatdate})
@@ -355,12 +442,22 @@ def main():
     orderwriter = csv.writer(buf, quoting=csv.QUOTE_MINIMAL, delimiter="\t")
 
     logging.warning("Fetching region orders")
-    fetch_wave(session, urls, orderwriter, requeue_retries={1, 2})
+    try:
+        failed = fetch_wave(session, urls, orderwriter, 3, deadline)
+    except ESIUnhealthy as e:
+        esi_unhealthy_exit('region fetch aborted: {}'.format(e))
+    if failed:
+        # A missing region silently skews the region and universe aggregates,
+        # so a partial region set is never published.
+        esi_unhealthy_exit('{} region page(s) failed after retries, e.g. {}'.format(
+            len(failed), ', '.join('{}p{}'.format(f['region'], f['page']) for f in failed[:5])))
 
     if structures_df.empty:
         # Nothing to fetch, so skip authenticating entirely -- lets this run
         # before structurePoller.py has ever populated structures.json.
         logging.warning("No structures known, skipping OAuth and structure-order fetch")
+    elif esistatus.get(STRUCTURE_ORDERS_ROUTE) == 'Down':
+        logging.warning("ESI reports {} as Down; skipping OAuth and structure markets this run".format(STRUCTURE_ORDERS_ROUTE))
     else:
         # Structure orders need an authenticated (OAuth) ESI call. A failure
         # here shouldn't discard the region orders already fetched into buf --
@@ -393,9 +490,14 @@ def main():
                               'retry': 0, 'page': 1, 'region': row['regionID'], 'structure': 1})
 
             logging.warning("Fetching structure orders")
-            fetch_wave(session, urls, orderwriter, requeue_retries={1})
+            failed = fetch_wave(session, urls, orderwriter, 2, deadline)
+            if failed:
+                logging.warning("{} structure page(s) failed after retries; their buy orders are missing this run".format(len(failed)))
         except Exception:
             logging.exception("OAuth refresh or structure-order fetch failed; continuing with region orders only")
+
+    if orders_written['count'] == 0:
+        esi_unhealthy_exit('no orders fetched at all')
 
     buf.seek(0)
     orders_df = pandas.read_csv(buf, sep="\t", header=None, names=ORDER_COLUMNS)

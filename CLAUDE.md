@@ -117,6 +117,39 @@ user explicitly asks you to.
   never take down the whole run — region/station/system/universe aggregates
   should still get published from whatever was already fetched. Keep that
   ordering and the try/except if you touch this path.
+- **ESI outage handling** (`aggloader-esi.py`; mirrors `/opt/pricegetter`):
+  - **Preflight:** `main()` reads `GET https://esi.evetech.net/meta/status`,
+    the API behind developers.eveonline.com/status. It returns per-route
+    `OK`/`Degraded`/`Recovering`/`Down`.
+  - **Skip the run:** if the status endpoint is unreachable, or
+    `/markets/{region_id}/orders` is `Down`, nothing is fetched or
+    published. "Unreachable" covers a connection error, a timeout, a
+    non-2xx response, or unparseable JSON, and it is treated as "ESI is
+    down".
+  - **Structures Down:** if `/markets/structures/{structure_id}` is `Down`,
+    OAuth and the structure fetch are skipped and the run carries on
+    without them.
+  - **Region data is all-or-nothing:** if any region page still fails after
+    3 tries, if the 20-min `FETCH_DEADLINE_SECONDS` passes, or if zero
+    orders were fetched, the run exits before writing anything to Redis. A
+    partial region set silently skews the universe aggregates. Structure
+    failures don't abort the run, which keeps the OAuth-resilience rule
+    above: an `ESIUnhealthy` raised in the structure wave is caught by
+    that `try/except`.
+  - **Exit code and reporting:** all of these go through
+    `esi_unhealthy_exit()`. It prints an `ESI-UNHEALTHY: <reason>` line to
+    stderr and exits with code 75. `loadPrices.sh` posts that reason to
+    Discord only for the first failure; it creates `esi-unhealthy.state`
+    (gitignored) to remember the outage. It posts once more on the next
+    successful run, when it also deletes the state file. The wrapper exits
+    0 either way. Other failures still alert on every run through the
+    `ERR` trap.
+  - **Error limit:** 420/429 responses don't use up retries. The pause is
+    applied once per batch from `X-ESI-Error-Limit-Reset`/`Retry-After`,
+    never as a per-response `sleep`. Once
+    `X-ESI-Error-Limit-Remain <= ERROR_LIMIT_FLOOR`, the rest of the batch
+    is cancelled and requeued.
+  - **Backoff:** retry rounds back off 5s, 10s, and so on (capped at 30s).
 - All requests use `REQUEST_TIMEOUT = 30`; no blocking call should be added
   without a timeout.
 - **Logging**: each Python script and each `.sh` wrapper write datestamped
