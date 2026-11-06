@@ -165,6 +165,15 @@ user explicitly asks you to.
   successful run that finds stale data.
 - Uses `uv` (see `pyproject.toml`/`uv.lock`) — run scripts as `uv run python
   <script>.py`, not a bare venv `python`.
+- Python 3.14 (`.python-version`), a uv-managed interpreter in `/opt/python` on this
+  server, not apt's `python3`. uv only finds it with `UV_PYTHON_INSTALL_DIR=/opt/python`,
+  so set that for `uv sync`/`uv lock`/`uv python upgrade 3.14`; `uv run` reuses the
+  existing `.venv` without it. Security fixes for the interpreter come from
+  `uv python upgrade`, not apt.
+- After a pandas/numpy upgrade, check the aggregates against the previous versions on a
+  saved `/opt/orderbooks/orderset-*.csv.gz` (call `run_scope_pass` with a recording
+  pipe). On 2026-11-06 (pandas 2.3 → 3.1, numpy 2.2 → 2.5) every key matched, and 0.1% of
+  `weightedaverage`/`fivepercent` values differed in the last bit (float summation order).
 
 ## Do not
 

@@ -5,13 +5,13 @@ description = "EVE Online market loader that fetches ESI orders and publishes ag
 authors = [
     { name = "Steve Ronuken", email = "steve@fuzzysteve.co.uk" }
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.14"
 dependencies = [
-    "numpy>=2.2.6",
-    "pandas>=2.3.3",
+    "numpy>=2.5.4",
+    "pandas>=3.1.1",
     "redis>=8.1.0",
     "requests>=2.34.2",
-    "requests-futures>=1.0.2",
+    "requests-futures>=1.1.0",
 ]
 
 [tool.uv]

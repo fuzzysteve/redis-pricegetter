@@ -174,7 +174,7 @@ only), and `--debug` for verbose logging.
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.14+
 - [uv](https://docs.astral.sh/uv/)
 - A reachable Redis instance
 - An EVE ESI application (client id/secret) and a refresh token with
