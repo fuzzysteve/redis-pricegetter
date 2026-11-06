@@ -49,16 +49,16 @@ ORDER_COLUMNS = ['orderID', 'typeID', 'issued', 'buy', 'volume', 'volumeEntered'
 
 
 def setup_logging(debug=False):
-    today = datetime.datetime.utcnow().strftime('%Y-%m-%d')
+    today = datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%d')
     logfile = 'logs/aggloader-esi-{}.log'.format(today)
     level = logging.DEBUG if debug else logging.INFO
     logging.basicConfig(filename=logfile, level=level, format='%(asctime)s %(levelname)s %(message)s')
 
-    cutoff = datetime.datetime.utcnow() - datetime.timedelta(days=LOG_RETENTION_DAYS)
+    cutoff = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=LOG_RETENTION_DAYS)
     for path in glob.glob('logs/aggloader-esi-*.log'):
         datestr = os.path.basename(path)[len('aggloader-esi-'):-len('.log')]
         try:
-            filedate = datetime.datetime.strptime(datestr, '%Y-%m-%d')
+            filedate = datetime.datetime.strptime(datestr, '%Y-%m-%d').replace(tzinfo=datetime.UTC)
         except ValueError:
             continue
         if filedate < cutoff:
@@ -402,7 +402,7 @@ def main():
     redis_db = config.getint('redis', 'db', fallback=0)
     redis_password = config.get('redis', 'password', fallback=None)
 
-    compatdate = (datetime.datetime.utcnow() - datetime.timedelta(hours=11)).strftime('%Y-%m-%d')
+    compatdate = (datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=11)).strftime('%Y-%m-%d')
 
     deadline = time.time() + FETCH_DEADLINE_SECONDS
     esistatus = get_esi_status(useragent, compatdate)
@@ -526,7 +526,8 @@ def main():
     logging.warning("Universe Aggregates")
     run_scope_pass(orders_df, None, pipe, literal_scope='0')
 
-    redisdb.set(REDIS_KEY_PREFIX + "fp-lastupdate", datetime.datetime.utcnow().isoformat())
+    # UTC without an offset, the format the site (and the PHP rollback) parses.
+    redisdb.set(REDIS_KEY_PREFIX + "fp-lastupdate", datetime.datetime.now(datetime.UTC).replace(tzinfo=None).isoformat())
 
     # Separate concern from the order aggregates above (already published) -
     # a failure here shouldn't be treated as a failed run.

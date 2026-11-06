@@ -33,16 +33,16 @@ STRUCTURE_ID_THRESHOLD = 100000000
 
 
 def setup_logging(debug=False):
-    today = datetime.datetime.utcnow().strftime('%Y-%m-%d')
+    today = datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%d')
     logfile = 'logs/structurePoller-{}.log'.format(today)
     level = logging.DEBUG if debug else logging.INFO
     logging.basicConfig(filename=logfile, level=level, format='%(asctime)s %(levelname)s %(message)s')
 
-    cutoff = datetime.datetime.utcnow() - datetime.timedelta(days=LOG_RETENTION_DAYS)
+    cutoff = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=LOG_RETENTION_DAYS)
     for path in glob.glob('logs/structurePoller-*.log'):
         datestr = os.path.basename(path)[len('structurePoller-'):-len('.log')]
         try:
-            filedate = datetime.datetime.strptime(datestr, '%Y-%m-%d')
+            filedate = datetime.datetime.strptime(datestr, '%Y-%m-%d').replace(tzinfo=datetime.UTC)
         except ValueError:
             continue
         if filedate < cutoff:
@@ -199,7 +199,7 @@ def main():
         wanted = {int(r) for r in args.regions.split(',')}
         regionids = [r for r in regionids if r in wanted]
 
-    compatdate = (datetime.datetime.utcnow() - datetime.timedelta(hours=11)).strftime('%Y-%m-%d')
+    compatdate = (datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=11)).strftime('%Y-%m-%d')
     if not check_esi_status(useragent, compatdate):
         logging.warning("Skipping this run: ESI status check did not succeed")
         return
@@ -242,7 +242,7 @@ def main():
     logging.warning("Resolved {} of {} candidate structures".format(len(structures), len(candidates)))
 
     snapshot = {
-        'generated_at': datetime.datetime.utcnow().isoformat(),
+        'generated_at': datetime.datetime.now(datetime.UTC).isoformat(),
         'structures': structures,
     }
     atomic_write(out_path, lambda f: json.dump(snapshot, f))

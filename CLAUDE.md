@@ -152,6 +152,11 @@ user explicitly asks you to.
   - **Backoff:** retry rounds back off 5s, 10s, and so on (capped at 30s).
 - All requests use `REQUEST_TIMEOUT = 30`; no blocking call should be added
   without a timeout.
+- **Times are UTC**: use `datetime.datetime.now(datetime.UTC)` and give built datetimes
+  `tzinfo=datetime.UTC`, never `utcnow()`/`utcfromtimestamp()` (deprecated in 3.12+) or a
+  bare `now()`. `generated_at` in the JSON files carries a `+00:00` offset. Redis
+  `fp-lastupdate` is naive UTC (`.replace(tzinfo=None).isoformat()`), the format the
+  Fuzzwork site parses.
 - **Logging**: each Python script and each `.sh` wrapper write datestamped
   logs (`logs/<script>-YYYY-MM-DD.log`) and self-prune anything older than
   `LOG_RETENTION_DAYS` (7) — no logrotate dependency. Credentials/tokens are

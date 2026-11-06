@@ -34,7 +34,7 @@ def build_snapshot(sqlite_path):
     regions = sorted({info['regionID'] for info in stations.values()})
 
     return {
-        'generated_at': datetime.datetime.utcnow().isoformat(),
+        'generated_at': datetime.datetime.now(datetime.UTC).isoformat(),
         'regions': regions,
         'stations': stations,
         'solarSystems': solar_systems,
