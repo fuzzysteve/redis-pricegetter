@@ -124,11 +124,13 @@ different):
 | `pricegetter-structurepoller.timer` | 02:13 UTC daily | Low-frequency structure discovery, anchored well clear of the downtime window. |
 
 All three also set `Persistent=true` (catches up after a reboot/downtime)
-and a small `RandomizedDelaySec` jitter. `aggloader-esi.py` and
-`structurePoller.py` additionally do their own ESI status pre-flight check
-(`GET /status/`) at the start of each run and skip quietly if it fails, so
-an unplanned ESI outage — or the daily downtime running long — doesn't turn
-into a wall of per-request retry failures.
+and a small `RandomizedDelaySec` jitter. Both scripts also check ESI's status
+before doing any real work, so an unplanned ESI outage, or the daily downtime
+running long, doesn't turn into a wall of per-request retry failures.
+`aggloader-esi.py` reads the per-route `GET /meta/status` and skips the run
+(exit 75, one Discord alert per outage) if it's unreachable or region orders
+are `Down`; see CLAUDE.md. `structurePoller.py` hits `GET /status/` and skips
+quietly if it fails.
 
 ## Redis key format
 
