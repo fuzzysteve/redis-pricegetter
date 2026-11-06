@@ -268,6 +268,29 @@ def write_redis(agg2, pipe):
     pipe.execute()
 
 
+def fetch_and_publish_prices(useragent, compatdate, redisdb):
+    # Mirrors priceImport.php's eveprice-<typeid> keys, which other Fuzzwork
+    # tools read directly - no MySQL side here, this pipeline is SQL-free.
+    headers = {'User-Agent': useragent, 'X-Compatibility-Date': compatdate}
+    resp = requests.get('https://esi.evetech.net/markets/prices/?datasource=tranquility',
+                         headers=headers, timeout=REQUEST_TIMEOUT)
+    resp.raise_for_status()
+    prices = resp.json()
+
+    pipe = redisdb.pipeline()
+    count = 0
+    for entry in prices:
+        average = entry.get('average_price', 0) or 0
+        adjusted = entry.get('adjusted_price', 0) or 0
+        pipe.set(REDIS_KEY_PREFIX + "eveprice-{}".format(entry['type_id']), "{}|{}".format(average, adjusted))
+        count += 1
+        if count > 1000:
+            count = 0
+            pipe.execute()
+    pipe.execute()
+    logging.warning("Published {} type prices".format(len(prices)))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--debug', action='store_true')
@@ -402,6 +425,14 @@ def main():
     run_scope_pass(orders_df, None, pipe, literal_scope='0')
 
     redisdb.set(REDIS_KEY_PREFIX + "fp-lastupdate", datetime.datetime.utcnow().isoformat())
+
+    # Separate concern from the order aggregates above (already published) -
+    # a failure here shouldn't be treated as a failed run.
+    logging.warning("Fetching type prices")
+    try:
+        fetch_and_publish_prices(useragent, compatdate, redisdb)
+    except Exception:
+        logging.exception("Type price fetch/publish failed")
 
     logging.warning("Complete")
 
